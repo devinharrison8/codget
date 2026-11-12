@@ -42,6 +42,14 @@ namespace NGDP {
     std::string version;
   };
 
+  // Fallback cdns/versions data for programs that are not (yet) published on
+  // the battle.net patch endpoint (us.patch.battle.net:1119). Keyed by program code.
+  extern const std::map<std::string, std::vector<std::string>> OfflineCdns;
+  extern const std::map<std::string, std::vector<std::string>> OfflineVersions;
+  // Same for the per-build config files (normally fetched from the CDN "config" path),
+  // keyed by build key.
+  extern const std::map<std::string, std::string> OfflineBuildConfigs;
+
   class NGDP {
   public:
     NGDP(std::string const& app);

@@ -11,6 +11,10 @@ namespace NGDP {
   const std::map<std::string, std::string> ProgramCodes = {
     { "agent", "Battle.net Agent" },
     { "auks", "Call of Duty HQ" },
+    { "s1", "Call of Duty: Black Ops 7" },
+    { "s1dev", "Call of Duty: Black Ops 7 Dev" },
+    { "s1b", "Call of Duty: Black Ops 7 Beta" },
+    { "fore", "Call of Duty: Black Ops 7 (hardcoded build 26122688)" },
     { "bna", "Battle.net App" },
     { "lazarus", "Call of Duty: MW2 Campaign Remastered" },
     { "lazarus_dev", "Call of Duty: MW2 Campaign Remastered Dev" },
@@ -36,12 +40,65 @@ namespace NGDP {
     { "fenrisb", "Diablo IV Beta" },
   };
 
+  // cdns/versions lines in the exact same "region|path|hosts" /
+  // "region|build|cdn|unknown|id|version" format used by us.patch.battle.net:1119.
+  const std::map<std::string, std::vector<std::string>> OfflineCdns = {
+    // Call of Duty (program code "fore"), taken from a manually dumped build config.
+    { "fore", {
+      "us|tpr/fore|level3.blizzard.com us.cdn.blizzard.com",
+      "eu|tpr/fore|level3.blizzard.com eu.cdn.blizzard.com",
+    } },
+  };
+
+  const std::map<std::string, std::vector<std::string>> OfflineVersions = {
+    // cdn key left empty: the offline build config below is used instead
+    { "fore", {
+      "us|20260225__S4_TU27__v26122688__BNET_Signed_r_ship||0|26122688|1.27.0.26122688",
+      "eu|20260225__S4_TU27__v26122688__BNET_Signed_r_ship||0|26122688|1.27.0.26122688",
+    } },
+  };
+
+  // Build configs dumped from a manually obtained build config file. Used when the
+  // CDN does not serve the config (or we do not know the cdn key hash).
+  const std::map<std::string, std::string> OfflineBuildConfigs = {
+    { "20260225__S4_TU27__v26122688__BNET_Signed_r_ship",
+      "root = e2bf978f659987201842911dde54973f\n"
+      "install = 93a444b0a7ca53bb3538ba28cc68a9f9 ab2bac43f752feadaaa4ef54d021d5a2\n"
+      "install-size = 6151 5836\n"
+      "download = f371159d4d496ae7f474f338bf55f589 a7016dd3bfd15f3ae742f09d00e5562c\n"
+      "download-size = 248055 220335\n"
+      "size = 3c6b5d41fc500ad768427a11ec267238 567f708d21468827b85ade99f0b12f03\n"
+      "size-size = 158383 135419\n"
+      "encoding = 299f672330a71623916f5bce14d84c02 5d06955c1b5fdae00e887104b26f76ee\n"
+      "encoding-size = 644128 644295\n"
+      "patch-index = 9d738d2cbfdd231f593091225da5acbd 86d87270eef480de1cd8cb09c97cf8ef\n"
+      "patch-index-size = 6251 3575\n"
+      "build-name = 20260225__S4_TU27__v26122688__BNET_Signed_r_ship\n"
+      "build-product = fore\n"
+      "feature-placeholder = true\n"
+      "vfs-root = 6e2dd3d674bf09403dc89532594cdda2 0dd3226e430dffa0cbb23b6e828ab329\n"
+      "vfs-root-size = 698644 398378\n"
+      "vfs-1 = 6e2dd3d674bf09403dc89532594cdda2 0dd3226e430dffa0cbb23b6e828ab329\n"
+      "vfs-1-size = 698644 398378\n"
+    },
+  };
+
   NGDP::NGDP(std::string const& app)
     : program_(app)
   {
     File file = HttpRequest::get(HOST + "/" + app + "/cdns");
     if (!file) {
-      throw Exception("failed to fetch cdns file");
+      auto it = OfflineCdns.find(app);
+      if (it == OfflineCdns.end()) {
+        throw Exception("failed to fetch cdns file");
+      }
+      MemoryFile offline;
+      for (std::string const& line : it->second) {
+        offline.write(line.data(), line.size());
+        offline.write("\n", 1);
+      }
+      offline.seek(0);
+      file = offline;
     }
     for (std::string const& line : file) {
       if (line.substr(0, 2) == "##") continue;
@@ -54,7 +111,17 @@ namespace NGDP {
 
     file = HttpRequest::get(HOST + "/" + app + "/versions");
     if (!file) {
-      throw Exception("failed to fetch versions file");
+      auto it = OfflineVersions.find(app);
+      if (it == OfflineVersions.end()) {
+        throw Exception("failed to fetch versions file");
+      }
+      MemoryFile offline;
+      for (std::string const& line : it->second) {
+        offline.write(line.data(), line.size());
+        offline.write("\n", 1);
+      }
+      offline.seek(0);
+      file = offline;
     }
     for (std::string const& line : file) {
       if (line.substr(0, 2) == "##") continue;
@@ -67,6 +134,15 @@ namespace NGDP {
       config.version = parts[5];
       if (cdns_.count(parts[0])) {
         regions_.push_back(parts[0]);
+      }
+    }
+
+    // Programs that are not published on the patch endpoint have no cdn key hash.
+    // In that case use the build key itself as the "cdn" key: NGDP::load() resolves
+    // it to the offline build config (see OfflineBuildConfigs).
+    for (auto& kv : versions_) {
+      if (kv.second.cdn.empty() && !kv.second.build.empty()) {
+        kv.second.cdn = kv.second.build;
       }
     }
   }
@@ -86,6 +162,13 @@ namespace NGDP {
     return url;
   }
   File NGDP::load(std::string const& hash, std::string const& type, bool index) const {
+    // offline build configs are keyed by build name and stored in the "config" path
+    if (!index && type == "config") {
+      auto it = OfflineBuildConfigs.find(hash);
+      if (it != OfflineBuildConfigs.end()) {
+        return File::memfile(it->second.data(), it->second.size());
+      }
+    }
     return HttpRequest::get(geturl(hash, type, index));
   }
 
